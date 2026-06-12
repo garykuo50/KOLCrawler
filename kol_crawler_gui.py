@@ -277,20 +277,45 @@ async def crawl(keyword: str, max_ch: int, min_sub: float,
                     # 點開「顯示更多」/ 關於，以抓取總觀看與加入日期
                     try:
                         clicked = False
-                        # 1. 優先嘗試用文字尋找可見的「顯示更多」或「About」按鈕
-                        for text_val in ["顯示更多", "... 顯示更多", "...more", "about this channel", "關於此頻道", "更多內容", "more"]:
-                            try:
-                                locator = page.get_by_text(text_val).first
-                                if await locator.count() > 0 and await locator.is_visible():
-                                    await locator.evaluate("el => el.click()")
-                                    clicked = True
-                                    break
-                            except Exception:
-                                pass
-                                
-                        # 2. 若文字點擊未成功，則嘗試使用常見的 CSS 選擇器/Aria-label 屬性
+                        # 1. 優先使用 JS 直接尋找與點擊 Tagline (關於頻道) 區塊，這在所有通道上（不論有無縮寫、何種語系）都最為精準
+                        try:
+                            js_click_success = await page.evaluate("""() => {
+                                let tagline = document.querySelector('ytd-channel-tagline-renderer, yt-description-preview-view-model, #channel-tagline, #description-container, .yt-description-preview-view-model-truncated');
+                                if (tagline) {
+                                    let link = tagline.querySelector('a, button') || tagline;
+                                    link.click();
+                                    return true;
+                                }
+                                return false;
+                            }""")
+                            if js_click_success:
+                                clicked = True
+                                await page.wait_for_timeout(1500)
+                        except Exception as ex:
+                            print(f"JS tagline click error: {ex}")
+
+                        # 2. 若 JS 點擊未成功，嘗試用文字（繁中、英文等）尋找可見的「顯示更多」或「About」按鈕
+                        if not clicked:
+                            for text_val in ["顯示更多", "... 顯示更多", "...more", "about this channel", "關於此頻道", "更多內容", "more"]:
+                                try:
+                                    locator = page.get_by_text(text_val).first
+                                    if await locator.count() > 0:
+                                        await locator.evaluate("el => el.click()")
+                                        clicked = True
+                                        await page.wait_for_timeout(1500)
+                                        break
+                                except Exception:
+                                    pass
+                                    
+                        # 3. 若仍未成功，則嘗試使用常見的 CSS 選擇器/Aria-label 屬性 (不檢查 is_visible 以避免 Web Component 判定問題)
                         if not clicked:
                             about_selectors = [
+                                'ytd-channel-tagline-renderer a',
+                                '#channel-tagline a',
+                                'yt-description-preview-view-model a',
+                                'ytd-channel-tagline-renderer',
+                                '#channel-tagline',
+                                'yt-description-preview-view-model',
                                 'button[aria-label*="about this channel" i]',
                                 'button[aria-label*="關於此頻道" i]',
                                 'button[aria-label*="顯示更多" i]',
@@ -302,9 +327,10 @@ async def crawl(keyword: str, max_ch: int, min_sub: float,
                             for selector in about_selectors:
                                 try:
                                     locator = page.locator(selector).first
-                                    if await locator.count() > 0 and await locator.is_visible():
+                                    if await locator.count() > 0:
                                         await locator.evaluate("el => el.click()")
                                         clicked = True
+                                        await page.wait_for_timeout(1500)
                                         break
                                 except Exception:
                                     pass
@@ -322,11 +348,10 @@ async def crawl(keyword: str, max_ch: int, min_sub: float,
                             for d_sel in dialog_selectors:
                                 try:
                                     locator = page.locator(d_sel).first
-                                    # 先等待對話框本體可見
                                     await locator.wait_for(state="visible", timeout=5000)
                                     
                                     # 增加輪詢等待：YouTube 的詳細資訊是異步載入，常有骨架屏載入延遲，等 "view" 或 "觀看" 字眼出現
-                                    for _ in range(20): # 20 * 200ms = 4秒最大等待
+                                    for _ in range(25): # 25 * 200ms = 5秒最大等待
                                         txt = await locator.inner_text()
                                         if any(k in txt.lower() for k in ["view", "觀看", "views", "次觀看"]):
                                             dialog_text = txt
@@ -337,12 +362,21 @@ async def crawl(keyword: str, max_ch: int, min_sub: float,
                                         break
                                 except Exception:
                                     pass
+                                    
+                            # 備用方案：如果對話框讀取不到，直接找所有可見 dialog 或 body 的文字來匹配
+                            if not dialog_text:
+                                try:
+                                    drawer_locator = page.locator("ytd-about-channel-renderer, yt-about-channel-view-model, tp-yt-paper-dialog, ytd-popup-container, [role='dialog']").first
+                                    if await drawer_locator.count() > 0:
+                                        dialog_text = await drawer_locator.inner_text()
+                                except Exception:
+                                    pass
                             
                             if dialog_text:
-                                # 總觀看數
-                                view_match = re.search(r'([\d,]+)\s*(?:views|次觀看|觀看)', dialog_text, re.IGNORECASE)
+                                # 總觀看數 (使用更寬鬆的匹配，包含小數點與逗號)
+                                view_match = re.search(r'([\d\.,]+)\s*(?:views|次觀看|觀看)', dialog_text, re.IGNORECASE)
                                 if not view_match:
-                                    view_match = re.search(r'(?:觀看次數|觀看)[：:\s]+([\d,]+)', dialog_text, re.IGNORECASE)
+                                    view_match = re.search(r'(?:觀看次數|觀看)[：:\s]+([\d\.,]+)', dialog_text, re.IGNORECASE)
                                 if view_match:
                                     raw_v = view_match.group(1).replace(',', '')
                                     try:
