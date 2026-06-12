@@ -8,6 +8,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 from datetime import datetime
 import mysql.connector
+import webbrowser
 
 from playwright.async_api import async_playwright
 
@@ -186,7 +187,7 @@ def save_record(keyword, channel_name, channel_url,
 # ─────────────────────────────────────────
 #  爬蟲核心（async）
 # ─────────────────────────────────────────
-async def crawl(keyword: str, max_ch: int,
+async def crawl(keyword: str, max_ch: int, min_sub: float,
                 on_progress, on_result, on_done, on_error, is_stopped):
     try:
         async with async_playwright() as p:
@@ -243,8 +244,6 @@ async def crawl(keyword: str, max_ch: int,
                 creator = handle[2:]
                 subscribers = "Unknown"
                 avg_views = "Unknown"
-                max_views = "Unknown"
-                max_view_video_url = ""
                 channel_total_views = "Unknown"
                 joined_date = "Unknown"
 
@@ -269,10 +268,16 @@ async def crawl(keyword: str, max_ch: int,
                     except Exception:
                         pass
 
+                    # 篩選條件：訂閱數過濾
+                    numeric_sub = parse_views_str(subscribers)
+                    if subscribers != "Unknown" and numeric_sub < min_sub:
+                        on_progress(f"  ⚠ 跳過 {creator} (訂閱數 {subscribers} 未達最低限制)")
+                        continue
+
                     # 點開「顯示更多」/ 關於，以抓取總觀看與加入日期
                     try:
                         clicked = False
-                        # 1. 優先嘗試用文字（繁中、英文等）尋找可見的「顯示更多」或「About」按鈕
+                        # 1. 優先嘗試用文字尋找可見的「顯示更多」或「About」按鈕
                         for text_val in ["顯示更多", "... 顯示更多", "...more", "about this channel", "關於此頻道", "更多內容", "more"]:
                             try:
                                 locator = page.get_by_text(text_val).first
@@ -317,8 +322,17 @@ async def crawl(keyword: str, max_ch: int,
                             for d_sel in dialog_selectors:
                                 try:
                                     locator = page.locator(d_sel).first
-                                    await locator.wait_for(state="visible", timeout=3000)
-                                    dialog_text = await locator.inner_text()
+                                    # 先等待對話框本體可見
+                                    await locator.wait_for(state="visible", timeout=5000)
+                                    
+                                    # 增加輪詢等待：YouTube 的詳細資訊是異步載入，常有骨架屏載入延遲，等 "view" 或 "觀看" 字眼出現
+                                    for _ in range(20): # 20 * 200ms = 4秒最大等待
+                                        txt = await locator.inner_text()
+                                        if any(k in txt.lower() for k in ["view", "觀看", "views", "次觀看"]):
+                                            dialog_text = txt
+                                            break
+                                        await page.wait_for_timeout(200)
+                                        
                                     if dialog_text:
                                         break
                                 except Exception:
@@ -361,125 +375,9 @@ async def crawl(keyword: str, max_ch: int,
                     except Exception:
                         pass
 
-                    # 3. 掃描所有影片資訊以找到最高觀看數及 URL
-                    try:
-                        popular_clicked = False
-                        # 嘗試點擊 "Popular" 或 "熱門" 標籤
-                        popular_selectors = [
-                            'yt-formatted-string:has-text("Popular")',
-                            'yt-formatted-string:has-text("熱門")',
-                            'a:has-text("Popular")',
-                            'a:has-text("熱門")',
-                            'role=tab[name="Popular"]',
-                            'role=tab[name="熱門"]'
-                        ]
-                        for sel in popular_selectors:
-                            try:
-                                locator = page.locator(sel).first
-                                if await locator.count() > 0 and await locator.is_visible():
-                                    await locator.click(timeout=3000)
-                                    popular_clicked = True
-                                    await page.wait_for_timeout(2000)
-                                    break
-                            except Exception:
-                                pass
-                        
-                        if not popular_clicked:
-                            await page.goto(f"{url}/videos?view=0&sort=p", wait_until="domcontentloaded", timeout=15000)
-                            await page.wait_for_timeout(2500)
-                        
-                        # 等待影片連結加載完成，確保網頁已渲染出影片列表
-                        try:
-                            await page.wait_for_selector("a#video-title-link", timeout=8000)
-                        except Exception:
-                            pass
-
-                        # 捲動幾次以載入更多熱門影片
-                        for _ in range(3):
-                            if is_stopped():
-                                break
-                            await page.keyboard.press("PageDown")
-                            await page.wait_for_timeout(600)
-                            
-                        # 再次等待，確保滾動載入的內容就緒
-                        try:
-                            await page.wait_for_selector("a#video-title-link", timeout=3000)
-                        except Exception:
-                            pass
-
-                        grid_selectors = ["ytd-rich-grid-media", "ytd-grid-video-renderer", "ytd-rich-item-renderer", "ytd-video-renderer"]
-                        video_cards = []
-                        for sel in grid_selectors:
-                            elements = await page.locator(sel).all()
-                            if len(elements) > 0:
-                                video_cards = elements
-                                break
-                                
-                        if not video_cards:
-                            # 備用方案：如果找不到容器，直接找所有影片連結作為 card
-                            video_cards = await page.locator("a#video-title-link").all()
-
-                        if video_cards:
-                            max_num = -1.0
-                            best_url = ""
-                            best_views_str = "Unknown"
-                            
-                            for card in video_cards:
-                                try:
-                                    card_tag = await card.evaluate("el => el.tagName.toLowerCase()")
-                                    if card_tag == "a":
-                                        href = await card.get_attribute("href")
-                                        card_url = f"https://www.youtube.com{href}" if href else ""
-                                        
-                                        # 使用 JS 往上找父容器並尋找觀看數，避免定位不到
-                                        card_views_str = await card.evaluate("""el => {
-                                            let parent = el.closest('ytd-rich-grid-media, ytd-grid-video-renderer, ytd-rich-item-renderer, ytd-video-renderer, ytd-compact-video-renderer');
-                                            if (!parent) parent = el.parentElement.parentElement;
-                                            if (parent) {
-                                                let text = parent.innerText;
-                                                let lines = text.split('\\n');
-                                                for (let line of lines) {
-                                                    if (line.toLowerCase().includes('view') || line.includes('觀看')) {
-                                                        return line;
-                                                    }
-                                                }
-                                            }
-                                            return '';
-                                        }""")
-                                    else:
-                                        link_el = card.locator("a#video-title-link")
-                                        if await link_el.count() > 0:
-                                            href = await link_el.first.get_attribute("href")
-                                            card_url = f"https://www.youtube.com{href}" if href else ""
-                                        else:
-                                            continue
-                                            
-                                        meta_items = await card.locator("span.inline-metadata-item, #metadata-line span").all()
-                                        card_views_str = ""
-                                        for meta in meta_items:
-                                            txt = await meta.inner_text()
-                                            if any(k in txt.lower() for k in ["view", "觀看"]):
-                                                card_views_str = txt
-                                                break
-                                                
-                                    if card_views_str and card_url:
-                                        numeric_views = parse_views_str(card_views_str)
-                                        if numeric_views > max_num:
-                                            max_num = numeric_views
-                                            best_url = card_url
-                                            best_views_str = format_number(numeric_views)
-                                except Exception as ex:
-                                    print(f"Error parsing card: {ex}")
-                                    
-                            if max_num >= 0:
-                                max_views = best_views_str
-                                max_view_video_url = best_url
-                    except Exception as e:
-                        print(f"Error scanning videos: {e}")
-
                     on_result(keyword, creator, url,
-                              subscribers, avg_views, max_views,
-                              max_view_video_url, channel_total_views, joined_date)
+                              subscribers, avg_views,
+                              channel_total_views, joined_date)
 
                 except Exception as e:
                     on_progress(f"  ⚠ 跳過 {handle}: {e}")
@@ -510,12 +408,18 @@ class App(tk.Tk):
         tk.Label(top, text="關鍵字：", font=("Microsoft JhengHei", 11)).pack(side="left")
         self.kw_var = tk.StringVar()
         tk.Entry(top, textvariable=self.kw_var,
-                 font=("Microsoft JhengHei", 11), width=20).pack(side="left", padx=(0, 12))
+                 font=("Microsoft JhengHei", 11), width=15).pack(side="left", padx=(0, 12))
 
         tk.Label(top, text="最多頻道：", font=("Microsoft JhengHei", 11)).pack(side="left")
         self.max_var = tk.IntVar(value=MAX_CHANNELS)
         tk.Spinbox(top, from_=5, to=500, textvariable=self.max_var,
                    width=6, font=("Microsoft JhengHei", 11)).pack(side="left", padx=(0, 12))
+
+        # 篩選條件：最低訂閱數
+        tk.Label(top, text="最低訂閱：", font=("Microsoft JhengHei", 11)).pack(side="left", padx=(6, 0))
+        self.min_sub_var = tk.StringVar(value="10,000")
+        tk.Entry(top, textvariable=self.min_sub_var,
+                 font=("Microsoft JhengHei", 11), width=10).pack(side="left", padx=(0, 12))
 
         self.btn_start = tk.Button(
             top, text="▶  開始爬取",
@@ -562,7 +466,8 @@ class App(tk.Tk):
         self.pbar.pack(fill="x", padx=10, pady=(0, 4))
 
         # ── 結果表格 ─────────────────────────────
-        cols = ("關鍵字", "頻道名稱", "訂閱數", "平均觀看", "最高觀看", "最高觀看影片網址", "總觀看數", "加入日期", "紀錄時間", "頻道網址")
+        # 移除了最高觀看、最高觀看影片網址，並將紀錄時間放到最後面
+        cols = ("關鍵字", "頻道名稱", "訂閱數", "平均觀看", "總觀看數", "加入日期", "頻道網址", "紀錄時間")
         frame = tk.Frame(self)
         frame.pack(fill="both", expand=True, padx=10, pady=(0, 6))
 
@@ -576,9 +481,9 @@ class App(tk.Tk):
         vsb.config(command=self.tree.yview)
         hsb.config(command=self.tree.xview)
 
-        col_widths = [90, 150, 80, 90, 90, 180, 90, 110, 140, 180]
+        col_widths = [90, 180, 90, 100, 100, 130, 280, 150]
         for col, w in zip(cols, col_widths):
-            self.tree.heading(col, text=col)
+            self.tree.heading(col, text=col, command=lambda _col=col: self._sort_column(_col, False))
             self.tree.column(col, width=w, minwidth=60)
 
         self.tree.grid(row=0, column=0, sticky="nsew")
@@ -587,8 +492,11 @@ class App(tk.Tk):
         frame.rowconfigure(0, weight=1)
         frame.columnconfigure(0, weight=1)
 
+        # 綁定雙擊項目開啟頻道網址
+        self.tree.bind("<Double-1>", self._on_tree_double_click)
+
         # ── 狀態列 ──────────────────────────────
-        self.status_var = tk.StringVar(value="共 0 筆")
+        self.status_var = tk.StringVar(value="共 0 筆 | 💡 雙擊列表項目可開啟頻道網址")
         tk.Label(self, textvariable=self.status_var,
                  font=("Microsoft JhengHei", 9),
                  anchor="w", fg="#333").pack(fill="x", padx=10, pady=(0, 4))
@@ -596,6 +504,37 @@ class App(tk.Tk):
         self._row_count = 0
 
     # ── 事件 ────────────────────────────────────
+    def _on_tree_double_click(self, event):
+        selected = self.tree.selection()
+        if not selected:
+            return
+        item_values = self.tree.item(selected[0], "values")
+        # 頻道網址在 index = 6
+        if len(item_values) > 6:
+            url = item_values[6]
+            if url.startswith("http"):
+                webbrowser.open(url)
+
+    def _sort_column(self, col: str, reverse: bool):
+        items = self.tree.get_children("")
+        
+        def get_value_key(item_id):
+            val = self.tree.set(item_id, col)
+            # 針對數值格式進行訂閱數與觀看數的數值轉換排序
+            if col in ["訂閱數", "平均觀看", "總觀看數"]:
+                return parse_views_str(val)
+            try:
+                return float(val.replace(",", "").strip())
+            except ValueError:
+                return val.lower()
+                
+        sorted_items = sorted(items, key=get_value_key, reverse=reverse)
+        
+        for index, item_id in enumerate(sorted_items):
+            self.tree.move(item_id, "", index)
+            
+        self.tree.heading(col, command=lambda: self._sort_column(col, not reverse))
+
     def _on_open_db_settings(self):
         settings_win = tk.Toplevel(self)
         settings_win.title("資料庫設定 (MariaDB/MySQL)")
@@ -732,6 +671,10 @@ class App(tk.Tk):
             messagebox.showerror("資料庫錯誤", f"無法連線到 MariaDB/MySQL：\n{e}")
             return
 
+        # 讀取並解析最低訂閱數
+        min_sub_str = self.min_sub_var.get().strip()
+        min_sub_val = parse_views_str(min_sub_str)
+
         self._crawling = True
         self._stop_flag = False
         self.btn_start.config(state="disabled")
@@ -747,7 +690,7 @@ class App(tk.Tk):
             asyncio.set_event_loop(loop)
             loop.run_until_complete(
                 crawl(
-                    kw, max_ch,
+                    kw, max_ch, min_sub_val,
                     on_progress=self._on_progress,
                     on_result=self._on_result,
                     on_done=self._on_done,
@@ -776,26 +719,27 @@ class App(tk.Tk):
         self.after(0, lambda: self.progress_var.set(msg))
 
     def _on_result(self, keyword, creator, url,
-                   subscribers, avg_views, max_views,
-                   max_view_video_url, channel_total_views, joined_date):
+                   subscribers, avg_views, channel_total_views, joined_date):
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         try:
+            # max_views 與 max_view_video_url 傳入 None 寫入資料庫以維持結構相容
             save_record(keyword, creator, url,
-                        subscribers, avg_views, max_views,
-                        max_view_video_url, channel_total_views, joined_date)
+                        subscribers, avg_views, None,
+                        None, channel_total_views, joined_date)
         except Exception as e:
             err_msg = str(e)
             self.after(0, lambda: self.progress_var.set(f"⚠ DB 寫入失敗: {err_msg}"))
 
         def _insert():
+            # 插入資料順序對齊 cols: ("關鍵字", "頻道名稱", "訂閱數", "平均觀看", "總觀看數", "加入日期", "頻道網址", "紀錄時間")
             self.tree.insert(
                 "", "end",
                 values=(keyword, creator, subscribers,
-                        avg_views, max_views, max_view_video_url,
-                        channel_total_views, joined_date, now, url)
+                        avg_views, channel_total_views, joined_date,
+                        url, now)
             )
             self._row_count += 1
-            self.status_var.set(f"共 {self._row_count} 筆")
+            self.status_var.set(f"共 {self._row_count} 筆 | 💡 雙擊列表項目可開啟頻道網址")
 
         self.after(0, _insert)
 
