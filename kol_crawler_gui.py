@@ -1,5 +1,11 @@
 import sys
 import os
+
+# If running inside a PyInstaller frozen executable, force Playwright to search for browsers in the system's local AppData.
+# This prevents it from looking in the temporary extraction directory (_MEIxxxxxx) where browsers are not bundled.
+if getattr(sys, 'frozen', False):
+    os.environ["PLAYWRIGHT_BROWSERS_PATH"] = os.path.join(os.environ.get("LOCALAPPDATA", ""), "ms-playwright")
+
 import asyncio
 import re
 import csv

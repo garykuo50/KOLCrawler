@@ -30,3 +30,8 @@ coverage.xml
 # Covers folder contents (keep the directory but ignore files inside)
 covers/*
 !covers/.gitkeep
+
+# PyInstaller
+build/
+dist/
+*.spec
