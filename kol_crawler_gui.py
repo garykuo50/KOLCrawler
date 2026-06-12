@@ -184,6 +184,42 @@ def save_record(keyword, channel_name, channel_url,
     cur.close()
     conn.close()
 
+def get_distinct_keywords() -> list[str]:
+    """獲取資料庫中所有已爬取的不重複關鍵字"""
+    cfg = dict(DB_CONFIG)
+    cfg["connection_timeout"] = 5
+    try:
+        conn = mysql.connector.connect(**cfg)
+        cur = conn.cursor()
+        cur.execute("SELECT DISTINCT keyword FROM kol_records ORDER BY keyword ASC")
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+        return [r[0] for r in rows]
+    except Exception as e:
+        print(f"Error fetching distinct keywords: {e}")
+        return []
+
+def get_records_by_keyword(keyword: str) -> list[tuple]:
+    """根據關鍵字查詢資料庫中所有匹配的紀錄"""
+    cfg = dict(DB_CONFIG)
+    cfg["connection_timeout"] = 5
+    try:
+        conn = mysql.connector.connect(**cfg)
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT keyword, channel_name, subscribers, avg_views, channel_total_views, joined_date, channel_url, recorded_at "
+            "FROM kol_records WHERE keyword = %s ORDER BY recorded_at DESC",
+            (keyword,)
+        )
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+        return rows
+    except Exception as e:
+        print(f"Error fetching records by keyword: {e}")
+        return []
+
 # ─────────────────────────────────────────
 #  爬蟲核心（async）
 # ─────────────────────────────────────────
@@ -317,7 +353,6 @@ async def crawl(keyword: str, max_ch: int, min_sub: float,
                                         break
                                 except Exception:
                                     pass
-                                    pass
                         
                         if clicked:
                             # 等待對話框顯示並獲取其文字
@@ -415,13 +450,31 @@ class App(tk.Tk):
         self.title("YouTube KOL Crawler")
         self.geometry("1150x700")
         self.resizable(True, True)
-        self._build_ui()
         self._crawling = False
         self._last_keyword = ""
+        self._build_ui()
 
     def _build_ui(self):
+        # 建立分頁筆記本 Notebook
+        self.notebook = ttk.Notebook(self)
+        self.notebook.pack(fill="both", expand=True)
+
+        # ── 分頁一：實時爬蟲 ──────────────────
+        self.tab_crawler = tk.Frame(self.notebook)
+        self.notebook.add(self.tab_crawler, text="  🔍 實時爬蟲 (Active Crawler)  ")
+        self._build_crawler_tab()
+
+        # ── 分頁二：歷史資料庫 ────────────────
+        self.tab_history = tk.Frame(self.notebook)
+        self.notebook.add(self.tab_history, text="  📂 歷史資料庫 (Historical Database)  ")
+        self._build_history_tab()
+
+        # 綁定分頁切換事件（自動載入/更新關鍵字下拉選單）
+        self.notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
+
+    def _build_crawler_tab(self):
         # ── 頂部設定列 ──────────────────────────
-        top = tk.Frame(self, padx=10, pady=8)
+        top = tk.Frame(self.tab_crawler, padx=10, pady=8)
         top.pack(fill="x")
 
         tk.Label(top, text="關鍵字：", font=("Microsoft JhengHei", 11)).pack(side="left")
@@ -477,17 +530,16 @@ class App(tk.Tk):
 
         # ── 進度條 ──────────────────────────────
         self.progress_var = tk.StringVar(value="就緒")
-        tk.Label(self, textvariable=self.progress_var,
+        tk.Label(self.tab_crawler, textvariable=self.progress_var,
                  font=("Microsoft JhengHei", 9),
                  anchor="w", fg="#555").pack(fill="x", padx=10)
 
-        self.pbar = ttk.Progressbar(self, mode="indeterminate")
+        self.pbar = ttk.Progressbar(self.tab_crawler, mode="indeterminate")
         self.pbar.pack(fill="x", padx=10, pady=(0, 4))
 
         # ── 結果表格 ─────────────────────────────
-        # 移除了最高觀看、最高觀看影片網址，並將紀錄時間放到最後面
         cols = ("關鍵字", "頻道名稱", "訂閱數", "平均觀看", "總觀看數", "加入日期", "頻道網址", "紀錄時間")
-        frame = tk.Frame(self)
+        frame = tk.Frame(self.tab_crawler)
         frame.pack(fill="both", expand=True, padx=10, pady=(0, 6))
 
         vsb = ttk.Scrollbar(frame, orient="vertical")
@@ -516,19 +568,130 @@ class App(tk.Tk):
 
         # ── 狀態列 ──────────────────────────────
         self.status_var = tk.StringVar(value="共 0 筆 | 💡 雙擊列表項目可開啟頻道網址")
-        tk.Label(self, textvariable=self.status_var,
+        tk.Label(self.tab_crawler, textvariable=self.status_var,
                  font=("Microsoft JhengHei", 9),
                  anchor="w", fg="#333").pack(fill="x", padx=10, pady=(0, 4))
 
         self._row_count = 0
 
-    # ── 事件 ────────────────────────────────────
+    def _build_history_tab(self):
+        # ── 頂部設定列 ──────────────────────────
+        top = tk.Frame(self.tab_history, padx=10, pady=8)
+        top.pack(fill="x")
+
+        tk.Label(top, text="歷史關鍵字：", font=("Microsoft JhengHei", 11)).pack(side="left")
+        
+        self.hist_kw_combo = ttk.Combobox(top, font=("Microsoft JhengHei", 10), state="readonly", width=20)
+        self.hist_kw_combo.pack(side="left", padx=(0, 12))
+        self.hist_kw_combo.bind("<<ComboboxSelected>>", self._on_history_keyword_selected)
+
+        self.btn_refresh_hist = tk.Button(
+            top, text="🔄 重新整理",
+            font=("Microsoft JhengHei", 11),
+            bg="#607D8B", fg="white", padx=12,
+            command=self._refresh_history_keywords
+        )
+        self.btn_refresh_hist.pack(side="left")
+
+        self.btn_export_hist_csv = tk.Button(
+            top, text="📥 匯出歷史 CSV",
+            font=("Microsoft JhengHei", 11, "bold"),
+            bg="#4CAF50", fg="white", padx=12,
+            command=self._on_export_history_csv
+        )
+        self.btn_export_hist_csv.pack(side="left", padx=(12, 0))
+
+        # ── 歷史結果表格 ─────────────────────────────
+        cols = ("關鍵字", "頻道名稱", "訂閱數", "平均觀看", "總觀看數", "加入日期", "頻道網址", "紀錄時間")
+        frame = tk.Frame(self.tab_history)
+        frame.pack(fill="both", expand=True, padx=10, pady=(0, 6))
+
+        vsb = ttk.Scrollbar(frame, orient="vertical")
+        hsb = ttk.Scrollbar(frame, orient="horizontal")
+
+        self.tree_history = ttk.Treeview(
+            frame, columns=cols, show="headings",
+            yscrollcommand=vsb.set, xscrollcommand=hsb.set
+        )
+        vsb.config(command=self.tree_history.yview)
+        hsb.config(command=self.tree_history.xview)
+
+        col_widths = [90, 180, 90, 100, 100, 130, 280, 150]
+        for col, w in zip(cols, col_widths):
+            self.tree_history.heading(col, text=col, command=lambda _col=col: self._sort_history_column(_col, False))
+            self.tree_history.column(col, width=w, minwidth=60)
+
+        self.tree_history.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+        hsb.grid(row=1, column=0, sticky="ew")
+        frame.rowconfigure(0, weight=1)
+        frame.columnconfigure(0, weight=1)
+
+        # 綁定雙擊項目開啟頻道網址
+        self.tree_history.bind("<Double-1>", self._on_history_tree_double_click)
+
+        # ── 狀態列 ──────────────────────────────
+        self.hist_status_var = tk.StringVar(value="請選擇關鍵字查詢 | 💡 雙擊列表項目可開啟頻道網址")
+        tk.Label(self.tab_history, textvariable=self.hist_status_var,
+                 font=("Microsoft JhengHei", 9),
+                 anchor="w", fg="#333").pack(fill="x", padx=10, pady=(0, 4))
+
+    # ── 事件與處理 ──────────────────────────────
+    def _on_tab_changed(self, event):
+        # 切換到歷史分頁時，自動重新整理關鍵字選單
+        selected_tab = self.notebook.index(self.notebook.select())
+        if selected_tab == 1:  # Tab 2 Index
+            self._refresh_history_keywords()
+
+    def _refresh_history_keywords(self):
+        keywords = get_distinct_keywords()
+        self.hist_kw_combo["values"] = keywords
+        current = self.hist_kw_combo.get()
+        if current not in keywords:
+            self.hist_kw_combo.set("")
+
+    def _on_history_keyword_selected(self, event):
+        kw = self.hist_kw_combo.get()
+        if not kw:
+            return
+            
+        # 清除 Treeview 資料
+        for item in self.tree_history.get_children():
+            self.tree_history.delete(item)
+            
+        # 查詢
+        rows = get_records_by_keyword(kw)
+        
+        # 寫入表格
+        for row in rows:
+            rec_time = row[7]
+            if isinstance(rec_time, datetime):
+                rec_time_str = rec_time.strftime("%Y-%m-%d %H:%M:%S")
+            else:
+                rec_time_str = str(rec_time)
+                
+            self.tree_history.insert(
+                "", "end",
+                values=(row[0], row[1], row[2], row[3], row[4], row[5], row[6], rec_time_str)
+            )
+            
+        self.hist_status_var.set(f"共 {len(rows)} 筆 | 💡 雙擊列表項目可開啟頻道網址")
+
     def _on_tree_double_click(self, event):
         selected = self.tree.selection()
         if not selected:
             return
         item_values = self.tree.item(selected[0], "values")
-        # 頻道網址在 index = 6
+        if len(item_values) > 6:
+            url = item_values[6]
+            if url.startswith("http"):
+                webbrowser.open(url)
+
+    def _on_history_tree_double_click(self, event):
+        selected = self.tree_history.selection()
+        if not selected:
+            return
+        item_values = self.tree_history.item(selected[0], "values")
         if len(item_values) > 6:
             url = item_values[6]
             if url.startswith("http"):
@@ -539,7 +702,6 @@ class App(tk.Tk):
         
         def get_value_key(item_id):
             val = self.tree.set(item_id, col)
-            # 針對數值格式進行訂閱數與觀看數的數值轉換排序
             if col in ["訂閱數", "平均觀看", "總觀看數"]:
                 return parse_views_str(val)
             try:
@@ -553,6 +715,25 @@ class App(tk.Tk):
             self.tree.move(item_id, "", index)
             
         self.tree.heading(col, command=lambda: self._sort_column(col, not reverse))
+
+    def _sort_history_column(self, col: str, reverse: bool):
+        items = self.tree_history.get_children("")
+        
+        def get_value_key(item_id):
+            val = self.tree_history.set(item_id, col)
+            if col in ["訂閱數", "平均觀看", "總觀看數"]:
+                return parse_views_str(val)
+            try:
+                return float(val.replace(",", "").strip())
+            except ValueError:
+                return val.lower()
+                
+        sorted_items = sorted(items, key=get_value_key, reverse=reverse)
+        
+        for index, item_id in enumerate(sorted_items):
+            self.tree_history.move(item_id, "", index)
+            
+        self.tree_history.heading(col, command=lambda: self._sort_history_column(col, not reverse))
 
     def _on_open_db_settings(self):
         settings_win = tk.Toplevel(self)
@@ -673,6 +854,35 @@ class App(tk.Tk):
                     writer.writerow(self.tree.item(item)["values"])
                     
             messagebox.showinfo("成功", f"資料已成功匯出至：\n{file_path}")
+        except Exception as e:
+            messagebox.showerror("錯誤", f"匯出失敗：\n{e}")
+
+    def _on_export_history_csv(self):
+        items = self.tree_history.get_children()
+        if not items:
+            messagebox.showwarning("提示", "目前沒有資料可以匯出！")
+            return
+            
+        from tkinter import filedialog
+        
+        file_path = filedialog.asksaveasfilename(
+            defaultextension=".csv",
+            filetypes=[("CSV Files", "*.csv"), ("All Files", "*.*")],
+            title="選擇儲存路徑",
+            initialfile=f"youtube_kol_history_{self.hist_kw_combo.get()}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        )
+        if not file_path:
+            return
+            
+        try:
+            cols = self.tree_history["columns"]
+            with open(file_path, "w", newline="", encoding="utf-8-sig") as f:
+                writer = csv.writer(f)
+                writer.writerow(cols)
+                for item in items:
+                    writer.writerow(self.tree_history.item(item)["values"])
+                    
+            messagebox.showinfo("成功", f"歷史資料已成功匯出至：\n{file_path}")
         except Exception as e:
             messagebox.showerror("錯誤", f"匯出失敗：\n{e}")
 
