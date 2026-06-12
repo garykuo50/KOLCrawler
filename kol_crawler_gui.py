@@ -277,62 +277,46 @@ async def crawl(keyword: str, max_ch: int, min_sub: float,
                     # 點開「顯示更多」/ 關於，以抓取總觀看與加入日期
                     try:
                         clicked = False
-                        # 1. 優先使用 JS 直接尋找與點擊 Tagline (關於頻道) 區塊，這在所有通道上（不論有無縮寫、何種語系）都最為精準
-                        try:
-                            js_click_success = await page.evaluate("""() => {
-                                let tagline = document.querySelector('ytd-channel-tagline-renderer, yt-description-preview-view-model, #channel-tagline, #description-container, .yt-description-preview-view-model-truncated');
-                                if (tagline) {
-                                    let link = tagline.querySelector('a, button') || tagline;
-                                    link.click();
-                                    return true;
-                                }
-                                return false;
-                            }""")
-                            if js_click_success:
-                                clicked = True
-                                await page.wait_for_timeout(1500)
-                        except Exception as ex:
-                            print(f"JS tagline click error: {ex}")
-
-                        # 2. 若 JS 點擊未成功，嘗試用文字（繁中、英文等）尋找可見的「顯示更多」或「About」按鈕
+                        # 1. 優先使用常見的 CSS 選擇器做 Playwright 原生點擊 (Playwright 原生點擊才能觸發 Polymer pointerdown/mouseup 事件)
+                        about_selectors = [
+                            'ytd-channel-tagline-renderer a',
+                            '#channel-tagline a',
+                            'yt-description-preview-view-model a',
+                            'yt-description-preview-view-model',
+                            'ytd-channel-tagline-renderer',
+                            '#channel-tagline',
+                            '#description-container',
+                            '.yt-description-preview-view-model-truncated',
+                            'button[aria-label*="about this channel" i]',
+                            'button[aria-label*="關於此頻道" i]',
+                            'button[aria-label*="顯示更多" i]',
+                            'button[aria-label*="更多內容" i]',
+                            'page-header-view-model yt-description-preview-view-model'
+                        ]
+                        for selector in about_selectors:
+                            try:
+                                locator = page.locator(selector).first
+                                if await locator.count() > 0:
+                                    # 用 Playwright 原生點擊
+                                    await locator.click(timeout=3000)
+                                    clicked = True
+                                    await page.wait_for_timeout(1500)
+                                    break
+                            except Exception:
+                                pass
+                                
+                        # 2. 若選擇器未點成功，嘗試使用文字做原生點擊
                         if not clicked:
                             for text_val in ["顯示更多", "... 顯示更多", "...more", "about this channel", "關於此頻道", "更多內容", "more"]:
                                 try:
                                     locator = page.get_by_text(text_val).first
                                     if await locator.count() > 0:
-                                        await locator.evaluate("el => el.click()")
+                                        await locator.click(timeout=3000)
                                         clicked = True
                                         await page.wait_for_timeout(1500)
                                         break
                                 except Exception:
                                     pass
-                                    
-                        # 3. 若仍未成功，則嘗試使用常見的 CSS 選擇器/Aria-label 屬性 (不檢查 is_visible 以避免 Web Component 判定問題)
-                        if not clicked:
-                            about_selectors = [
-                                'ytd-channel-tagline-renderer a',
-                                '#channel-tagline a',
-                                'yt-description-preview-view-model a',
-                                'ytd-channel-tagline-renderer',
-                                '#channel-tagline',
-                                'yt-description-preview-view-model',
-                                'button[aria-label*="about this channel" i]',
-                                'button[aria-label*="關於此頻道" i]',
-                                'button[aria-label*="顯示更多" i]',
-                                'button[aria-label*="更多內容" i]',
-                                'page-header-view-model yt-description-preview-view-model',
-                                '#description-container',
-                                '.yt-description-preview-view-model-truncated'
-                            ]
-                            for selector in about_selectors:
-                                try:
-                                    locator = page.locator(selector).first
-                                    if await locator.count() > 0:
-                                        await locator.evaluate("el => el.click()")
-                                        clicked = True
-                                        await page.wait_for_timeout(1500)
-                                        break
-                                except Exception:
                                     pass
                         
                         if clicked:
