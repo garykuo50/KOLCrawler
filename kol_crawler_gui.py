@@ -233,7 +233,29 @@ async def crawl(keyword: str, max_ch: int, min_sub: float,
                 on_progress, on_result, on_done, on_error, is_stopped):
     try:
         async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
+            try:
+                browser = await p.chromium.launch(headless=True)
+            except Exception as launch_err:
+                err_msg = str(launch_err)
+                if "Executable doesn't exist" in err_msg or "playwright install" in err_msg:
+                    on_progress("偵測到尚未安裝瀏覽器元件，系統將自動進行下載安裝（首次執行大約需要 1-2 分鐘，請保持網路連線）...")
+                    try:
+                        import sys
+                        from playwright.__main__ import main as playwright_main
+                        old_argv = sys.argv
+                        sys.argv = ["playwright", "install", "chromium"]
+                        try:
+                            playwright_main()
+                        except SystemExit:
+                            pass
+                        finally:
+                            sys.argv = old_argv
+                        on_progress("瀏覽器元件下載安裝完成，正在重新啟動瀏覽器...")
+                        browser = await p.chromium.launch(headless=True)
+                    except Exception as install_err:
+                        raise RuntimeError(f"自動下載瀏覽器元件失敗：{install_err}\n請確認您的網路連線後再試。")
+                else:
+                    raise launch_err
             ctx = await browser.new_context(
                 locale="en-US",
                 viewport={"width": 1280, "height": 720}
