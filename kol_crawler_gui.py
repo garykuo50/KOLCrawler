@@ -417,6 +417,7 @@ class App(tk.Tk):
         self.resizable(True, True)
         self._build_ui()
         self._crawling = False
+        self._last_keyword = ""
 
     def _build_ui(self):
         # ── 頂部設定列 ──────────────────────────
@@ -682,6 +683,17 @@ class App(tk.Tk):
             return
         if self._crawling:
             return
+
+        # 檢查關鍵字是否變更
+        if self._last_keyword and self._last_keyword != kw:
+            ans = messagebox.askyesno("提示", f"您已更換關鍵字（前一次為「{self._last_keyword}」，目前為「{kw}」），\n是否清除目前列表中的資料？")
+            if ans:
+                for item in self.tree.get_children():
+                    self.tree.delete(item)
+                self._row_count = 0
+                self.status_var.set("共 0 筆 | 💡 雙擊列表項目可開啟頻道網址")
+
+        self._last_keyword = kw
 
         try:
             ensure_db()
