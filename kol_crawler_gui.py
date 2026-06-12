@@ -271,22 +271,38 @@ async def crawl(keyword: str, max_ch: int,
 
                     # 點開「顯示更多」/ 關於，以抓取總觀看與加入日期
                     try:
-                        about_selectors = [
-                            'button[aria-label*="about this channel" i]',
-                            'button[aria-label*="關於此頻道" i]',
-                            'button[aria-label*="更多內容" i]',
-                            'page-header-view-model yt-description-preview-view-model',
-                            '#description-container',
-                            '.yt-description-preview-view-model-truncated'
-                        ]
                         clicked = False
-                        for selector in about_selectors:
-                            locator = page.locator(selector).first
-                            if await locator.count() > 0 and await locator.is_visible():
-                                # 使用 evaluate JS 點擊，防止被其它元素阻擋
-                                await locator.evaluate("el => el.click()")
-                                clicked = True
-                                break
+                        # 1. 優先嘗試用文字（繁中、英文等）尋找可見的「顯示更多」或「About」按鈕
+                        for text_val in ["顯示更多", "... 顯示更多", "...more", "about this channel", "關於此頻道", "更多內容", "more"]:
+                            try:
+                                locator = page.get_by_text(text_val).first
+                                if await locator.count() > 0 and await locator.is_visible():
+                                    await locator.evaluate("el => el.click()")
+                                    clicked = True
+                                    break
+                            except Exception:
+                                pass
+                                
+                        # 2. 若文字點擊未成功，則嘗試使用常見的 CSS 選擇器/Aria-label 屬性
+                        if not clicked:
+                            about_selectors = [
+                                'button[aria-label*="about this channel" i]',
+                                'button[aria-label*="關於此頻道" i]',
+                                'button[aria-label*="顯示更多" i]',
+                                'button[aria-label*="更多內容" i]',
+                                'page-header-view-model yt-description-preview-view-model',
+                                '#description-container',
+                                '.yt-description-preview-view-model-truncated'
+                            ]
+                            for selector in about_selectors:
+                                try:
+                                    locator = page.locator(selector).first
+                                    if await locator.count() > 0 and await locator.is_visible():
+                                        await locator.evaluate("el => el.click()")
+                                        clicked = True
+                                        break
+                                except Exception:
+                                    pass
                         
                         if clicked:
                             # 等待對話框顯示並獲取其文字
