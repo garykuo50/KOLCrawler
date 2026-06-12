@@ -1,0 +1,36 @@
+═══════════════════════════════════════════
+  YouTube KOL Crawler  —  啟動說明
+═══════════════════════════════════════════
+
+【第一次使用：安裝依賴】
+
+  pip install -r requirements.txt
+  playwright install chromium
+
+【執行程式】
+
+  python kol_crawler_gui.py
+
+【操作流程】
+
+  1. 在「關鍵字」欄輸入搜尋詞（例如：夜市美食）
+  2. 設定「最多頻道」數量（預設 50）
+  3. 按「▶ 開始爬取」
+  4. 程式自動搜尋、抓取資料，並即時寫入 MariaDB
+  5. 完成後表格顯示全部結果
+
+【資料庫】
+
+  主機：192.168.11.217
+  帳號：root
+  資料庫：kol_db
+  資料表：kol_records
+  欄位：keyword / channel_name / channel_url /
+        subscribers / avg_views / max_views / recorded_at
+
+  （程式啟動時會自動建立資料庫和資料表）
+
+  手動初始化（可選）：
+  mysql -h 192.168.11.217 -u root -p < init_db.sql
+
+═══════════════════════════════════════════

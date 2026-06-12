@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+pip-log.txt
+pip-delete-this-directory.txt
+.toast
+.cache
+.pytest_cache/
+.nosetests
+htmlcov/
+.tox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+
+# Local database
+*.db
+*.sqlite
+
+# Covers folder contents (keep the directory but ignore files inside)
+covers/*
+!covers/.gitkeep
