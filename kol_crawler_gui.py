@@ -272,8 +272,10 @@ async def crawl(keyword: str, max_ch: int,
                     # 點開「顯示更多」/ 關於，以抓取總觀看與加入日期
                     try:
                         about_selectors = [
-                            'page-header-view-model yt-description-preview-view-model',
                             'button[aria-label*="about this channel" i]',
+                            'button[aria-label*="關於此頻道" i]',
+                            'button[aria-label*="更多內容" i]',
+                            'page-header-view-model yt-description-preview-view-model',
                             '#description-container',
                             '.yt-description-preview-view-model-truncated'
                         ]
@@ -281,24 +283,30 @@ async def crawl(keyword: str, max_ch: int,
                         for selector in about_selectors:
                             locator = page.locator(selector).first
                             if await locator.count() > 0 and await locator.is_visible():
-                                await locator.click(timeout=3000)
+                                # 使用 evaluate JS 點擊，防止被其它元素阻擋
+                                await locator.evaluate("el => el.click()")
                                 clicked = True
                                 break
                         
                         if clicked:
-                            await page.wait_for_timeout(2000)
+                            # 等待對話框顯示並獲取其文字
                             dialog_selectors = [
                                 'yt-about-channel-view-model',
+                                'ytd-about-channel-renderer',
                                 'tp-yt-paper-dialog',
                                 'ytd-popup-container',
                                 '#about-container'
                             ]
                             dialog_text = ""
                             for d_sel in dialog_selectors:
-                                locator = page.locator(d_sel).first
-                                if await locator.count() > 0 and await locator.is_visible():
+                                try:
+                                    locator = page.locator(d_sel).first
+                                    await locator.wait_for(state="visible", timeout=3000)
                                     dialog_text = await locator.inner_text()
-                                    break
+                                    if dialog_text:
+                                        break
+                                except Exception:
+                                    pass
                             
                             if dialog_text:
                                 # 總觀看數
@@ -340,21 +348,36 @@ async def crawl(keyword: str, max_ch: int,
                     # 3. 掃描所有影片資訊以找到最高觀看數及 URL
                     try:
                         popular_clicked = False
-                        try:
-                            popular_chip = page.get_by_role("tab", name="Popular")
-                            if await popular_chip.count() == 0:
-                                popular_chip = page.get_by_text("Popular", exact=True)
-                            if await popular_chip.count() > 0:
-                                await popular_chip.first.click(timeout=3000)
-                                await page.wait_for_timeout(2000)
-                                popular_clicked = True
-                        except Exception:
-                            pass
+                        # 嘗試點擊 "Popular" 或 "熱門" 標籤
+                        popular_selectors = [
+                            'yt-formatted-string:has-text("Popular")',
+                            'yt-formatted-string:has-text("熱門")',
+                            'a:has-text("Popular")',
+                            'a:has-text("熱門")',
+                            'role=tab[name="Popular"]',
+                            'role=tab[name="熱門"]'
+                        ]
+                        for sel in popular_selectors:
+                            try:
+                                locator = page.locator(sel).first
+                                if await locator.count() > 0 and await locator.is_visible():
+                                    await locator.click(timeout=3000)
+                                    popular_clicked = True
+                                    await page.wait_for_timeout(2000)
+                                    break
+                            except Exception:
+                                pass
                         
                         if not popular_clicked:
                             await page.goto(f"{url}/videos?view=0&sort=p", wait_until="domcontentloaded", timeout=15000)
                             await page.wait_for_timeout(2500)
                         
+                        # 等待影片連結加載完成，確保網頁已渲染出影片列表
+                        try:
+                            await page.wait_for_selector("a#video-title-link", timeout=8000)
+                        except Exception:
+                            pass
+
                         # 捲動幾次以載入更多熱門影片
                         for _ in range(3):
                             if is_stopped():
@@ -362,7 +385,13 @@ async def crawl(keyword: str, max_ch: int,
                             await page.keyboard.press("PageDown")
                             await page.wait_for_timeout(600)
                             
-                        grid_selectors = ["ytd-rich-grid-media", "ytd-grid-video-renderer", "ytd-video-renderer"]
+                        # 再次等待，確保滾動載入的內容就緒
+                        try:
+                            await page.wait_for_selector("a#video-title-link", timeout=3000)
+                        except Exception:
+                            pass
+
+                        grid_selectors = ["ytd-rich-grid-media", "ytd-grid-video-renderer", "ytd-rich-item-renderer", "ytd-video-renderer"]
                         video_cards = []
                         for sel in grid_selectors:
                             elements = await page.locator(sel).all()
@@ -370,6 +399,10 @@ async def crawl(keyword: str, max_ch: int,
                                 video_cards = elements
                                 break
                                 
+                        if not video_cards:
+                            # 備用方案：如果找不到容器，直接找所有影片連結作為 card
+                            video_cards = await page.locator("a#video-title-link").all()
+
                         if video_cards:
                             max_num = -1.0
                             best_url = ""
@@ -377,29 +410,50 @@ async def crawl(keyword: str, max_ch: int,
                             
                             for card in video_cards:
                                 try:
-                                    link_el = card.locator("a#video-title-link")
-                                    if await link_el.count() > 0:
-                                        href = await link_el.first.get_attribute("href")
+                                    card_tag = await card.evaluate("el => el.tagName.toLowerCase()")
+                                    if card_tag == "a":
+                                        href = await card.get_attribute("href")
                                         card_url = f"https://www.youtube.com{href}" if href else ""
-                                    else:
-                                        continue
                                         
-                                    meta_items = await card.locator("span.inline-metadata-item, #metadata-line span").all()
-                                    card_views_str = ""
-                                    for meta in meta_items:
-                                        txt = await meta.inner_text()
-                                        if any(k in txt.lower() for k in ["view", "觀看"]):
-                                            card_views_str = txt
-                                            break
+                                        # 使用 JS 往上找父容器並尋找觀看數，避免定位不到
+                                        card_views_str = await card.evaluate("""el => {
+                                            let parent = el.closest('ytd-rich-grid-media, ytd-grid-video-renderer, ytd-rich-item-renderer, ytd-video-renderer, ytd-compact-video-renderer');
+                                            if (!parent) parent = el.parentElement.parentElement;
+                                            if (parent) {
+                                                let text = parent.innerText;
+                                                let lines = text.split('\\n');
+                                                for (let line of lines) {
+                                                    if (line.toLowerCase().includes('view') || line.includes('觀看')) {
+                                                        return line;
+                                                    }
+                                                }
+                                            }
+                                            return '';
+                                        }""")
+                                    else:
+                                        link_el = card.locator("a#video-title-link")
+                                        if await link_el.count() > 0:
+                                            href = await link_el.first.get_attribute("href")
+                                            card_url = f"https://www.youtube.com{href}" if href else ""
+                                        else:
+                                            continue
                                             
-                                    if card_views_str:
+                                        meta_items = await card.locator("span.inline-metadata-item, #metadata-line span").all()
+                                        card_views_str = ""
+                                        for meta in meta_items:
+                                            txt = await meta.inner_text()
+                                            if any(k in txt.lower() for k in ["view", "觀看"]):
+                                                card_views_str = txt
+                                                break
+                                                
+                                    if card_views_str and card_url:
                                         numeric_views = parse_views_str(card_views_str)
                                         if numeric_views > max_num:
                                             max_num = numeric_views
                                             best_url = card_url
                                             best_views_str = format_number(numeric_views)
-                                except Exception:
-                                    pass
+                                except Exception as ex:
+                                    print(f"Error parsing card: {ex}")
                                     
                             if max_num >= 0:
                                 max_views = best_views_str
